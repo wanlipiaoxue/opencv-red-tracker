@@ -1,0 +1,9 @@
+/build/
+/main
+/compile_commands.json
+/.cache/
+/.vscode/
+/data/result_*
+*.o
+*.swp
+*~
