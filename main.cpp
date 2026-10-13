@@ -21,7 +21,7 @@ bool detectred(cv::Mat &img, double &centerX, double &centerY, bool hasPrev,
   cv::inRange(hsv, cv::Scalar(0, 80, 80), cv::Scalar(10, 255, 255),
               redlow); //检测颜色范围
   cv::inRange(hsv, cv::Scalar(170, 80, 80), cv::Scalar(179, 255, 255),
-              redhigh);   //检测颜色范围
+              redhigh); //检测颜色范围，后期可考虑用变量代替Scalar
   dst = redhigh | redlow; //两张和到一起
   /*cv::Vec3b p1=dst.at<cv::Vec3b> (240,100);
   cv::Vec3b p2=dst.at<cv::Vec3b> (240,460);
@@ -37,7 +37,8 @@ bool detectred(cv::Mat &img, double &centerX, double &centerY, bool hasPrev,
   double bestDistance2 = 1e18;
   for (size_t i = 0; i < contours.size(); i++) {
     area = cv::contourArea(contours[i]);
-    if (area < 500) {
+    double miniarea = 500; //最小侦测面积
+    if (area < miniarea) {
       continue; //图形太小了
     }
     rect = cv::boundingRect(contours[i]);
@@ -80,7 +81,25 @@ bool detectred(cv::Mat &img, double &centerX, double &centerY, bool hasPrev,
 }
 int main() {
   cv::VideoCapture cap(
-      "data/test5_red_speedchange.avi"); //视频源文件
+      "data/test10_complex_red_challenge.avi"); //视频源文件
+  int fps = 10;                          //针对视频情况设置帧率
+  int width = 640, height = 480;         //设置分辨率
+  double HoldSeconds = 0.5;              //目标丢失后尝试跟踪时间
+  int maxLostFrames = HoldSeconds * fps; //尝试跟踪的帧数
+  double prevX = 0, prevY = 0;
+  bool hasPrev = false;
+  double lostFrames = 0;
+  double lastX = 0, lastY = 0;
+  bool hasPrediction = false;
+  double errorsum = 0, RightTimes = 0; //用于检测整体的预测情况如何
+  double errormax = 0;                 //最大误差
+  double errornow = 0;                 //当前帧误差
+  double recoveryErrorsum = 0;
+  int recoveryCount = 0;           //能计算找回误差的次数
+  int totalRecoveryCount = 0;      //实际找回次数
+  double lastDx = 0, lastDy = 0;   //上一帧预测值
+  bool hasSpeed = false;           //速度是否有效
+  double searchX = 0, searchY = 0; //搜索中心
   if (!cap.isOpened()) {
     cout << "视频打开失败"
          << "\n";
@@ -89,29 +108,38 @@ int main() {
   cv::Mat frame;
   long long sum = 0;
   cv::VideoWriter writer(
-      "data/result_red_speedchange_02.avi", //保存目录
-      cv::VideoWriter::fourcc('M', 'J', 'P', 'G'), 10, cv::Size(640, 480));
+      "data/result_complex_red_challenge_01.avi", //保存目录
+      cv::VideoWriter::fourcc('M', 'J', 'P', 'G'), fps,
+      cv::Size(width, height));
   if (!writer.isOpened()) {
     cout << "视频写入程序失败";
     return -1;
   }
-  double prevX = 0, prevY = 0;
-  bool hasPrev = false;
-  double lastX = 0, lastY = 0;
-  bool hasPrediction = false;
-  double errorsum = 0, RightTimes = 0; //用于检测整体的预测情况如何
-  double errormax = 0;                 //最大误差
-  double errornow = 0;                 //当前帧误差
-  while (cap.read(frame)) {            //读一帧
+  while (cap.read(frame)) { //读一帧
     cv::Mat img = frame;
     if (img.empty()) { // frame读不到
       cout << "读图失败，检查路径" << std::endl;
       return -1;
     }
     double centerX = 0, centerY = 0; //中心点坐标
-    bool found = detectred(frame, centerX, centerY, hasPrev, prevX,
-                           prevY); //检测目标，取当前帧中的图形中心
+    searchX = prevX, searchY = prevY;
+    if (hasPrev && lostFrames > 0 && hasSpeed) {
+      searchX = prevX + lastDx * (lostFrames + 1);
+      searchY = prevY + lastDy * (lostFrames + 1);
+    }
+    bool found = detectred(frame, centerX, centerY, hasPrev, searchX,
+                           searchY); //检测目标，取当前帧中的图形中心
     if (found) {
+      if (lostFrames != 0) {
+        totalRecoveryCount++; //丢失后重新找到就算找回；
+        if (hasSpeed) {
+          double recoveryError = hypot(centerX - searchX, centerY - searchY);
+          recoveryErrorsum += recoveryError;
+          recoveryCount++;
+          cout << "找回误差=" << recoveryError << "\n";
+        }
+        hasSpeed = false;
+      }
       if (hasPrediction) { //上一帧有预测
         cout << "误差=" << centerX - lastX << " " << centerY - lastY << "\n";
         RightTimes++;                                       //预测次数++
@@ -120,46 +148,72 @@ int main() {
         if (errornow > errormax) {
           errormax = errornow; //判断最大误差值
         }
-      }              //本帧中心与上一帧预测中心的误差
-      if (hasPrev) { //有上一帧，然后预测
+      } //本帧中心与上一帧预测中心的误差
+      if (hasPrev && lostFrames == 0) { //有上一帧，未丢失，则if内进行预测
         double dx = centerX - prevX; // x方向的位移
         double dy = centerY - prevY; // Y方向的位移
         double predictedx = centerX + dx;
-        double predictedy = centerY + dy; //预测下一帧的
+        double predictedy = centerY + dy; //预测下一帧的中心位置
         cv::circle(frame, cv::Point(cvRound(predictedx), cvRound(predictedy)),
-                   5, cv::Scalar(0, 255, 255), -1);
+                   5, cv::Scalar(0, 255, 255), -1); //在预测的下一帧中心加圆点
         lastX = predictedx;
         lastY = predictedy; //给下一轮来计算误差
-        hasPrediction = true;
+        lastDx = dx;
+        lastDy = dy;          //存入帧位移，用于下一帧预测
+        hasSpeed = true;      //速度有效
+        hasPrediction = true; //有预测
         cout << prevX << " " << prevY << " " << centerX << " " << centerY << " "
              << dx << " " << dy << " " << predictedx << " " << predictedy
              << "\n";
       }
       prevX = centerX, prevY = centerY; //存这一帧的中心，用于下次的位移计算
+      lostFrames = 0;                   //丢失帧数归零
       hasPrev = true;
-    } else {
-      hasPrev = false;
+    } else if (hasPrev) {
+      lostFrames++;
+
+      if (lostFrames > maxLostFrames) {
+        hasPrev = false;
+        lostFrames = 0;
+        hasSpeed = false;
+        cout << "目标确认丢失\n";
+      } else {
+        if (hasSpeed) {//丢失后预测中心点
+          double predictedX = prevX + lastDx * lostFrames;
+          double predictedY = prevY + lastDy * lostFrames;
+          cv::circle(frame, cv::Point(cvRound(predictedX), cvRound(predictedY)),
+                     5, cv::Scalar(0, 255, 255), -1);
+        }
+        cout << "目标暂时丢失\n";
+      }
+
       hasPrediction = false;
-      cout << "目标丢失"
-           << "\n";
     }
-    writer.write(frame);
-    sum++;
-    /*bool saved =
-        cv::imwrite("data/result_video_frame_01.png", img);
-    if (saved) {
-      cout << "saved success" << "\n";
-    } else {
-      cout << "saved fail" << "\n";
-      ;
-    }*/
-  }
-  writer.release();
-  cout << "处理帧数=" << sum << "\n";
-  if (RightTimes > 0) {
-    cout << "预测次数=" << RightTimes << "\n"
-         << "平均预测误差=" << errorsum / RightTimes << "\n"
-         << "最大误差=" << errormax << "\n";
-  }
-  return 0;
+
+  writer.write(frame);
+  sum++;
+  /*bool saved =
+      cv::imwrite("data/result_video_frame_01.png", img);
+  if (saved) {
+    cout << "saved success" << "\n";
+  } else {
+    cout << "saved fail" << "\n";
+    ;
+  }*/
+}
+writer.release();
+cout << "处理帧数=" << sum << "\n";
+if (RightTimes > 0) {
+  cout << "预测次数=" << RightTimes << "\n"
+       << "平均预测误差=" << errorsum / RightTimes << "\n"
+       << "最大误差=" << errormax << "\n";
+}
+cout << "实际找回次数=" << totalRecoveryCount << "\n";
+if (recoveryCount > 0) {
+  cout << "找回样本数=" << recoveryCount << "\n"
+       << "平均找回误差=" << recoveryErrorsum / recoveryCount << "\n";
+} else {
+  cout << "找回样本数=" << recoveryCount << "\n";
+}
+return 0;
 }
