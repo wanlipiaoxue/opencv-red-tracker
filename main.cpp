@@ -1,3 +1,4 @@
+#include <cmath>
 #include <iostream>
 #include <opencv2/core.hpp>
 #include <opencv2/core/mat.hpp>
@@ -18,9 +19,9 @@ bool detectred(cv::Mat &img, double &centerX, double &centerY, bool hasPrev,
   cv::Mat dst, clean, redlow, redhigh;
   vector<vector<cv::Point>> contours;
   cv::inRange(hsv, cv::Scalar(0, 80, 80), cv::Scalar(10, 255, 255),
-              redlow); //检测范围
+              redlow); //检测颜色范围
   cv::inRange(hsv, cv::Scalar(170, 80, 80), cv::Scalar(179, 255, 255),
-              redhigh);   //检测范围
+              redhigh);   //检测颜色范围
   dst = redhigh | redlow; //两张和到一起
   /*cv::Vec3b p1=dst.at<cv::Vec3b> (240,100);
   cv::Vec3b p2=dst.at<cv::Vec3b> (240,460);
@@ -31,7 +32,7 @@ bool detectred(cv::Mat &img, double &centerX, double &centerY, bool hasPrev,
   cv::findContours(clean, contours, cv::RETR_EXTERNAL,
                    cv::CHAIN_APPROX_SIMPLE); //找图形
   double area;
-  cv::Rect rect;
+  cv::Rect rect, trueRect;
   double bestArea = 0;
   double bestDistance2 = 1e18;
   for (size_t i = 0; i < contours.size(); i++) {
@@ -39,7 +40,6 @@ bool detectred(cv::Mat &img, double &centerX, double &centerY, bool hasPrev,
     if (area < 500) {
       continue; //图形太小了
     }
-    found = true;
     rect = cv::boundingRect(contours[i]);
     double candidateX = rect.x + rect.width / 2.0;
     double candidateY = rect.y + rect.height / 2.0;
@@ -47,15 +47,22 @@ bool detectred(cv::Mat &img, double &centerX, double &centerY, bool hasPrev,
     double diffY = candidateY - prevY;
     double distance2 = diffX * diffX + diffY * diffY;
     if ((!hasPrev && area > bestArea) ||
-        (hasPrev && distance2 < bestDistance2)) {
-      bestArea = area; //当前面积比最佳面积大的话，把当前的面积作为最佳面积标准
-      bestDistance2=distance2;//切换最佳距离
+        (hasPrev && distance2 < bestDistance2 &&
+         distance2 <=
+             6400)) { //上一帧没有的话选面积大的，有的话确认与上一帧目标的距离，防止目标面积突变出现跳转，并且将误差设为80*80,过大的话消失后容易侦测到其他的，太小的话容易抓不到正确的
+      bestArea =
+          area; //当前面积比最佳面积大的话，把当前的面积作为最佳面积标准比
+      bestDistance2 = distance2; //切换最佳距离
       centerX = candidateX;
       centerY = candidateY;
+      trueRect = rect;
+      found = true;
     } //找中心
     // cout << area << ' ' << rect << " " << centerX << " " << centerY << "\n";
-    cv::rectangle(img, rect, cv::Scalar(0, 255, 0), 2); //边框
-    cv::putText(img, "RED", cv::Point(rect.x, rect.y - 20),
+  }
+  if (found) {
+    cv::rectangle(img, trueRect, cv::Scalar(0, 255, 0), 2); //边框
+    cv::putText(img, "RED", cv::Point(trueRect.x, trueRect.y - 20),
                 cv::FONT_HERSHEY_COMPLEX, 0.6, cv::Scalar(0, 255, 0), 2);
   }
   /*cout<<(int)p1[0]<<" "<<(int)p1[1]<<" "<<(int)p1[2]<<"\n";
@@ -72,7 +79,8 @@ bool detectred(cv::Mat &img, double &centerX, double &centerY, bool hasPrev,
   return found;
 }
 int main() {
-  cv::VideoCapture cap("data/test8_area_swap.avi");
+  cv::VideoCapture cap(
+      "data/test5_red_speedchange.avi"); //视频源文件
   if (!cap.isOpened()) {
     cout << "视频打开失败"
          << "\n";
@@ -80,9 +88,9 @@ int main() {
   }
   cv::Mat frame;
   long long sum = 0;
-  cv::VideoWriter writer("data/result_area_swap_01.avi",
-                         cv::VideoWriter::fourcc('M', 'J', 'P', 'G'), 10,
-                         cv::Size(640, 480));
+  cv::VideoWriter writer(
+      "data/result_red_speedchange_02.avi", //保存目录
+      cv::VideoWriter::fourcc('M', 'J', 'P', 'G'), 10, cv::Size(640, 480));
   if (!writer.isOpened()) {
     cout << "视频写入程序失败";
     return -1;
@@ -91,18 +99,27 @@ int main() {
   bool hasPrev = false;
   double lastX = 0, lastY = 0;
   bool hasPrediction = false;
-  while (cap.read(frame)) { //读一帧
+  double errorsum = 0, RightTimes = 0; //用于检测整体的预测情况如何
+  double errormax = 0;                 //最大误差
+  double errornow = 0;                 //当前帧误差
+  while (cap.read(frame)) {            //读一帧
     cv::Mat img = frame;
     if (img.empty()) { // frame读不到
       cout << "读图失败，检查路径" << std::endl;
       return -1;
     }
-    double centerX = 0, centerY = 0;
+    double centerX = 0, centerY = 0; //中心点坐标
     bool found = detectred(frame, centerX, centerY, hasPrev, prevX,
                            prevY); //检测目标，取当前帧中的图形中心
     if (found) {
       if (hasPrediction) { //上一帧有预测
         cout << "误差=" << centerX - lastX << " " << centerY - lastY << "\n";
+        RightTimes++;                                       //预测次数++
+        errornow = hypot(centerX - lastX, centerY - lastY); //当前误差距离
+        errorsum += errornow;                               //误差距离汇总
+        if (errornow > errormax) {
+          errormax = errornow; //判断最大误差值
+        }
       }              //本帧中心与上一帧预测中心的误差
       if (hasPrev) { //有上一帧，然后预测
         double dx = centerX - prevX; // x方向的位移
@@ -139,5 +156,10 @@ int main() {
   }
   writer.release();
   cout << "处理帧数=" << sum << "\n";
+  if (RightTimes > 0) {
+    cout << "预测次数=" << RightTimes << "\n"
+         << "平均预测误差=" << errorsum / RightTimes << "\n"
+         << "最大误差=" << errormax << "\n";
+  }
   return 0;
 }
