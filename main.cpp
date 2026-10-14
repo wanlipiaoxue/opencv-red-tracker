@@ -11,33 +11,41 @@ using namespace std;
 bool detectred(cv::Mat &img, double &centerX, double &centerY, bool hasPrev,
                double prevX, double prevY) { //图像甄别标记函数
   bool found = false;
+  cv::Mat dst, clean, redlow, redhigh;
   cv::Mat hsv;
+  int kernelWidth = 9, kernelHeight = 9; //侵蚀核大小
+  cv::Size kernelSize(kernelWidth, kernelHeight);
   cv::cvtColor(img, hsv, cv::COLOR_BGR2HSV);
+  double area = 0;
+  cv::Rect rect, trueRect;
+  double bestArea = 0;
+  double bestDistance2 = 1e18;//
+  double miniarea = 500;                         //最小侦测面积
+  int maxDetectWidth = 80, maxDetectHeight = 80; //最大预测距离的区域
+  double maxDetectDistance = maxDetectHeight * maxDetectWidth; //最大预测距离
+  cv::Scalar hsv1Lower(170, 60, 50), hsv1Upper(179, 255, 255),
+      hsv2Lower(0, 60, 50),
+      hsv2Upper(10, 255, 255); //双颜色防止红色逆时针找不到
   /*std::cout << "宽=" << img.cols << " 高=" << img.rows
             << " 通道=" << img.channels() << std::endl
             <<"总像素数="<<img.total()<<"\n";*/
-  cv::Mat dst, clean, redlow, redhigh;
   vector<vector<cv::Point>> contours;
-  cv::inRange(hsv, cv::Scalar(0, 80, 80), cv::Scalar(10, 255, 255),
+  cv::inRange(hsv, hsv1Lower, hsv1Upper,
               redlow); //检测颜色范围
-  cv::inRange(hsv, cv::Scalar(170, 80, 80), cv::Scalar(179, 255, 255),
-              redhigh); //检测颜色范围，后期可考虑用变量代替Scalar
+  cv::inRange(hsv, hsv2Lower, hsv2Upper,
+              redhigh); //检测颜色范围，后期可考虑用变量代替Scalar(已改)
   dst = redhigh | redlow; //两张和到一起
   /*cv::Vec3b p1=dst.at<cv::Vec3b> (240,100);
   cv::Vec3b p2=dst.at<cv::Vec3b> (240,460);
   cv::Vec3b p3=dst.at<cv::Vec3b> (100,100);*/
   cv::Mat kernel =
-      cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(9, 9)); //侵蚀核
-  cv::morphologyEx(dst, clean, cv::MORPH_OPEN, kernel);             //侵蚀
+      cv::getStructuringElement(cv::MORPH_ELLIPSE, kernelSize); //侵蚀核
+  cv::morphologyEx(dst, clean, cv::MORPH_OPEN, kernel);         //侵蚀
   cv::findContours(clean, contours, cv::RETR_EXTERNAL,
                    cv::CHAIN_APPROX_SIMPLE); //找图形
-  double area;
-  cv::Rect rect, trueRect;
-  double bestArea = 0;
-  double bestDistance2 = 1e18;
   for (size_t i = 0; i < contours.size(); i++) {
     area = cv::contourArea(contours[i]);
-    double miniarea = 500; //最小侦测面积
+    // cout<<"候选面积="<<area<<"位置"<<'\n';
     if (area < miniarea) {
       continue; //图形太小了
     }
@@ -50,7 +58,7 @@ bool detectred(cv::Mat &img, double &centerX, double &centerY, bool hasPrev,
     if ((!hasPrev && area > bestArea) ||
         (hasPrev && distance2 < bestDistance2 &&
          distance2 <=
-             6400)) { //上一帧没有的话选面积大的，有的话确认与上一帧目标的距离，防止目标面积突变出现跳转，并且将误差设为80*80,过大的话消失后容易侦测到其他的，太小的话容易抓不到正确的
+             maxDetectDistance)) { //上一帧没有的话选面积大的，有的话确认与上一帧目标的距离，防止目标面积突变出现跳转，并且将误差设为80*80,过大的话消失后容易侦测到其他的，太小的话容易抓不到正确的
       bestArea =
           area; //当前面积比最佳面积大的话，把当前的面积作为最佳面积标准比
       bestDistance2 = distance2; //切换最佳距离
@@ -80,10 +88,9 @@ bool detectred(cv::Mat &img, double &centerX, double &centerY, bool hasPrev,
   return found;
 }
 int main() {
-  cv::VideoCapture cap(
-      "data/test10_complex_red_challenge.avi"); //视频源文件
-  int fps = 10;                          //针对视频情况设置帧率
-  int width = 640, height = 480;         //设置分辨率
+  cv::VideoCapture cap("/home/snire/rob/data/realtest.mp4"); //视频源文件
+  int fps = 30;                          //针对视频情况设置帧率
+  int width = 720, height = 1280;        //设置分辨率
   double HoldSeconds = 0.5;              //目标丢失后尝试跟踪时间
   int maxLostFrames = HoldSeconds * fps; //尝试跟踪的帧数
   double prevX = 0, prevY = 0;
@@ -108,7 +115,7 @@ int main() {
   cv::Mat frame;
   long long sum = 0;
   cv::VideoWriter writer(
-      "data/result_complex_red_challenge_01.avi", //保存目录
+      "/home/snire/rob/data/result_real_test_01.avi", //保存目录
       cv::VideoWriter::fourcc('M', 'J', 'P', 'G'), fps,
       cv::Size(width, height));
   if (!writer.isOpened()) {
@@ -178,7 +185,7 @@ int main() {
         hasSpeed = false;
         cout << "目标确认丢失\n";
       } else {
-        if (hasSpeed) {//丢失后预测中心点
+        if (hasSpeed) { //丢失后预测中心点
           double predictedX = prevX + lastDx * lostFrames;
           double predictedY = prevY + lastDy * lostFrames;
           cv::circle(frame, cv::Point(cvRound(predictedX), cvRound(predictedY)),
@@ -190,30 +197,30 @@ int main() {
       hasPrediction = false;
     }
 
-  writer.write(frame);
-  sum++;
-  /*bool saved =
-      cv::imwrite("data/result_video_frame_01.png", img);
-  if (saved) {
-    cout << "saved success" << "\n";
+    writer.write(frame);
+    sum++;
+    /*bool saved =
+        cv::imwrite("/home/snire/rob/data/result_video_frame_01.png", img);
+    if (saved) {
+      cout << "saved success" << "\n";
+    } else {
+      cout << "saved fail" << "\n";
+      ;
+    }*/
+  }
+  writer.release();
+  cout << "处理帧数=" << sum << "\n";
+  if (RightTimes > 0) {
+    cout << "预测次数=" << RightTimes << "\n"
+         << "平均预测误差=" << errorsum / RightTimes << "\n"
+         << "最大误差=" << errormax << "\n";
+  }
+  cout << "实际找回次数=" << totalRecoveryCount << "\n";
+  if (recoveryCount > 0) {
+    cout << "找回样本数=" << recoveryCount << "\n"
+         << "平均找回误差=" << recoveryErrorsum / recoveryCount << "\n";
   } else {
-    cout << "saved fail" << "\n";
-    ;
-  }*/
-}
-writer.release();
-cout << "处理帧数=" << sum << "\n";
-if (RightTimes > 0) {
-  cout << "预测次数=" << RightTimes << "\n"
-       << "平均预测误差=" << errorsum / RightTimes << "\n"
-       << "最大误差=" << errormax << "\n";
-}
-cout << "实际找回次数=" << totalRecoveryCount << "\n";
-if (recoveryCount > 0) {
-  cout << "找回样本数=" << recoveryCount << "\n"
-       << "平均找回误差=" << recoveryErrorsum / recoveryCount << "\n";
-} else {
-  cout << "找回样本数=" << recoveryCount << "\n";
-}
-return 0;
+    cout << "找回样本数=" << recoveryCount << "\n";
+  }
+  return 0;
 }
